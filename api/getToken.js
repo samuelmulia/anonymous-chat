@@ -1,7 +1,7 @@
-// File: /api/getToken.js
 const { AccessToken } = require('livekit-server-sdk');
 
-export default async function handler(req, res) {
+// This is a Vercel Serverless Function using standard CommonJS syntax.
+module.exports = async (req, res) => {
   const { roomName, identity } = req.query;
 
   if (typeof roomName !== 'string' || typeof identity !== 'string') {
@@ -9,7 +9,6 @@ export default async function handler(req, res) {
   }
 
   // These MUST be stored as Environment Variables on Vercel.
-  // They are NOT prefixed with REACT_APP_ because this is server code.
   const apiKey = process.env.LIVEKIT_API_KEY;
   const apiSecret = process.env.LIVEKIT_API_SECRET;
 
@@ -29,4 +28,4 @@ export default async function handler(req, res) {
   const token = await at.toJwt();
 
   res.status(200).json({ token });
-}
+};
