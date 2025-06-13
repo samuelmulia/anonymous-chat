@@ -1,7 +1,7 @@
-const { AccessToken } = require('livekit-server-sdk');
+import { AccessToken } from 'livekit-server-sdk';
 
-// This is a Vercel Serverless Function using standard CommonJS syntax.
-module.exports = async (req, res) => {
+// This is a Vercel Serverless Function using modern ES Module syntax.
+export default async function handler(req, res) {
   const { roomName, identity } = req.query;
 
   if (typeof roomName !== 'string' || typeof identity !== 'string') {
@@ -28,4 +28,4 @@ module.exports = async (req, res) => {
   const token = await at.toJwt();
 
   res.status(200).json({ token });
-};
+}
