@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import {
   LiveKitRoom,
   AudioConference,
-  useToken,
   ControlBar
 } from '@livekit/components-react';
 import '@livekit/components-styles';
@@ -10,30 +9,44 @@ import '@livekit/components-styles';
 // --- Main App Component ---
 export default function App() {
   const [roomId, setRoomId] = useState('');
-  const [identity] = useState(`user-${Math.random().toString(36).substring(7)}`);
-  const [isInRoom, setIsInRoom] = useState(false);
+  const [token, setToken] = useState(null); // NEW: Token is now in component state
 
-  // The useToken hook safely fetches a token from our Vercel Serverless Function
-  // It will only run when roomId is not an empty string.
-  const token = useToken('/api/getToken', roomId, { userInfo: { identity }});
-  
   // Get the LiveKit Server URL from Vercel Environment Variables
   const serverUrl = process.env.REACT_APP_LIVEKIT_URL;
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (roomId.trim()) {
-      setIsInRoom(true);
+      // Generate a simple random identity for the user
+      const identity = `user-${Math.random().toString(36).substring(7)}`;
+
+      try {
+        // 1. Fetch the token MANUALLY from our serverless function
+        const resp = await fetch(`/api/getToken?roomName=${roomId}&identity=${identity}`);
+        const data = await resp.json();
+        
+        if (data.token) {
+          // 2. Store the token in state, which will trigger the render of LiveKitRoom
+          setToken(data.token);
+        } else {
+          console.error("Failed to get a token:", data.error);
+          alert("Could not get access token. Please check server logs.");
+        }
+      } catch (err) {
+        console.error("Error fetching token:", err);
+        alert("There was an error fetching the access token.");
+      }
     }
   };
 
   const handleLeave = () => {
-    setIsInRoom(false);
+    // Clear the token to exit the room and return to the join form
+    setToken(null); 
     setRoomId('');
   }
 
-  // If we are in the room, render the LiveKit components
-  if (isInRoom) {
+  // If we have a token, render the LiveKit room.
+  if (token) {
     if (!serverUrl) {
       return (
         <div className="w-full max-w-md text-center mx-auto text-red-500">
@@ -48,12 +61,11 @@ export default function App() {
           token={token}
           serverUrl={serverUrl}
           connect={true}
-          audio={true} // Let LiveKit handle the microphone directly. This is the most stable method.
+          audio={true} // Now that we have a token, LiveKit can safely ask for the mic
           video={false}
-          onDisconnected={handleLeave} // Use our handleLeave function for the ControlBar
+          onDisconnected={handleLeave}
         >
-          {/* AudioConference handles the grid layout and participant tiles automatically. */}
-          {/* The talking indicator is built-in. */}
+          {/* AudioConference handles the grid layout, participant tiles, and talking indicators. */}
           <AudioConference />
           
           {/* ControlBar provides mute, leave, etc. */}
@@ -63,7 +75,7 @@ export default function App() {
     );
   }
 
-  // Otherwise, render the landing/join page
+  // Otherwise, render the join form.
   return (
     <div className="w-full max-w-md text-center mx-auto">
       <h1 className="text-5xl font-bold mb-4" style={{color: '#FFFFFF'}}>Anonymous</h1>
