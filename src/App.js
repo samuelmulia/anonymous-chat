@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, getDoc, setDoc, addDoc, collection, onSnapshot, updateDoc, deleteDoc } from 'firebase/firestore';
+import { getFirestore, doc, getDoc, setDoc, addDoc, collection, onSnapshot, updateDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 
 // --- Firebase Configuration ---
 // This will be filled in by Vercel's Environment Variables during deployment.
@@ -42,8 +42,9 @@ const App = () => {
   const [roomId, setRoomId] = useState('');
   const [voiceEffect, setVoiceEffect] = useState('none');
   const [error, setError] = useState('');
+  // Use a ref to hold the local stream to pass it between Lobby and ChatRoom
+  const localStreamRef = useRef(null); 
 
-  // Check for Firebase config on load to provide helpful feedback.
   useEffect(() => {
     if (!process.env.REACT_APP_APIKEY) {
       setError('Firebase is not configured. The app may not work online.');
@@ -55,11 +56,18 @@ const App = () => {
     setPage('lobby');
   };
 
-  const goToChat = () => {
+  const goToChat = (stream) => {
+    // *** FIX: Pass the stream acquired in the lobby to the chat room ***
+    localStreamRef.current = stream;
     setPage('chat');
   };
 
   const leaveRoom = () => {
+    // Clean up stream when leaving the room completely
+    if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
+        localStreamRef.current = null;
+    }
     setRoomId('');
     setPage('landing');
   };
@@ -69,9 +77,11 @@ const App = () => {
       case 'landing':
         return <LandingPage onGoToLobby={goToLobby} />;
       case 'lobby':
+        // *** FIX: Pass the goToChat function to the lobby ***
         return <Lobby roomId={roomId} onGoToChat={goToChat} voiceEffect={voiceEffect} setVoiceEffect={setVoiceEffect} />;
       case 'chat':
-        return <ChatRoom roomId={roomId} voiceEffect={voiceEffect} onLeave={leaveRoom} />;
+        // *** FIX: Pass the acquired local stream to the ChatRoom ***
+        return <ChatRoom roomId={roomId} voiceEffect={voiceEffect} onLeave={leaveRoom} localStream={localStreamRef.current} />;
       default:
         return <LandingPage onGoToLobby={goToLobby} />;
     }
@@ -100,7 +110,8 @@ const LandingPage = ({ onGoToLobby }) => {
     setIsCreating(true);
     try {
         const roomRef = collection(db, 'rooms');
-        const newRoomRef = await addDoc(roomRef, {});
+        // Initialize room with a 'connected' map for participants
+        const newRoomRef = await addDoc(roomRef, { connected: {} }); 
         onGoToLobby(newRoomRef.id);
     } catch (error) {
         console.error("Error creating room: ", error);
@@ -140,43 +151,64 @@ const LandingPage = ({ onGoToLobby }) => {
   );
 };
 
+
 // --- Lobby Component ---
 const Lobby = ({ roomId, onGoToChat, voiceEffect, setVoiceEffect }) => {
     const [micLevel, setMicLevel] = useState(0);
+    const [isMicAccessGranted, setIsMicAccessGranted] = useState(false);
+    const [micError, setMicError] = useState('');
+    const localStreamRef = useRef(null);
     const animationFrameId = useRef(null);
     
-    useEffect(() => {
-        let stream, context, analyser, dataArray;
-        const setupAudio = async () => {
-            try {
-                stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-                context = new (window.AudioContext || window.webkitAudioContext)();
-                const source = context.createMediaStreamSource(stream);
-                analyser = context.createAnalyser();
-                analyser.fftSize = 256;
-                source.connect(analyser);
-                dataArray = new Uint8Array(analyser.frequencyBinCount);
-                
-                const draw = () => {
-                    animationFrameId.current = requestAnimationFrame(draw);
-                    analyser.getByteFrequencyData(dataArray);
-                    let sum = dataArray.reduce((a, b) => a + b, 0);
-                    let avg = sum / dataArray.length;
-                    setMicLevel(Math.min(100, (avg / 128) * 100));
-                };
-                draw();
-            } catch (err) {
-                 console.error("Error accessing microphone:", err);
-            }
-        };
-
-        setupAudio();
-        
-        return () => {
-            if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
-            if (stream) stream.getTracks().forEach(track => track.stop());
-            if (context) context.close();
+    // --- FIX: Microphone access is now initiated by a user click ---
+    const handleJoinChat = async () => {
+        if (!isMicAccessGranted) {
+             setMicError('Please grant microphone access first.');
+             return;
         }
+        if (localStreamRef.current) {
+            onGoToChat(localStreamRef.current);
+        } else {
+            setMicError('Could not access microphone. Please check browser permissions.');
+        }
+    };
+
+    const getMicAccess = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            localStreamRef.current = stream;
+            setIsMicAccessGranted(true);
+            setMicError(''); // Clear any previous errors
+            
+            // Setup visualization
+            const context = new (window.AudioContext || window.webkitAudioContext)();
+            const source = context.createMediaStreamSource(stream);
+            const analyser = context.createAnalyser();
+            analyser.fftSize = 256;
+            source.connect(analyser);
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+            
+            const draw = () => {
+                animationFrameId.current = requestAnimationFrame(draw);
+                analyser.getByteFrequencyData(dataArray);
+                let sum = dataArray.reduce((a, b) => a + b, 0);
+                let avg = sum / dataArray.length;
+                setMicLevel(Math.min(100, (avg / 128) * 100));
+            };
+            draw();
+        } catch (err) {
+             console.error("Error accessing microphone:", err);
+             setMicError(`Error: ${err.message}. Please check your browser/system permissions.`);
+             setIsMicAccessGranted(false);
+        }
+    };
+
+    useEffect(() => {
+      // Cleanup function to stop tracks and animation when the component unmounts
+      return () => {
+          if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
+          // Don't stop the stream here, it's passed to the chat room
+      }
     }, []);
   
     return (
@@ -198,81 +230,127 @@ const Lobby = ({ roomId, onGoToChat, voiceEffect, setVoiceEffect }) => {
     
           <div className="mb-6">
               <h3 className="text-xl font-semibold mb-2">Microphone Test</h3>
+              {micError && <p className="text-red-500 mb-2">{micError}</p>}
+              {!isMicAccessGranted && (
+                  <button onClick={getMicAccess} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg transition duration-300 mb-4">
+                      Grant Mic Access
+                  </button>
+              )}
               <div className="w-full bg-gray-700 rounded-full h-4 overflow-hidden">
                   <div className="bg-green-500 h-4 rounded-full transition-all duration-100" style={{width: `${micLevel}%`}}></div>
               </div>
           </div>
     
-          <button onClick={onGoToChat} className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg transition duration-300">
+          <button onClick={handleJoinChat} disabled={!isMicAccessGranted} className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg transition duration-300 disabled:bg-gray-500 disabled:cursor-not-allowed">
             Join Chat
           </button>
         </div>
       );
 };
 
+
 // --- Chat Room Component ---
-const ChatRoom = ({ roomId, voiceEffect, onLeave }) => {
+const ChatRoom = ({ roomId, voiceEffect, onLeave, localStream }) => {
+    // --- FIX: Use a more robust state for participants ---
     const [participants, setParticipants] = useState([]);
     const [isMuted, setIsMuted] = useState(false);
-    const pc = useRef(new RTCPeerConnection(servers));
-    const localStream = useRef(null);
+    const peerConnections = useRef(new Map()); // Use a map to handle multiple peers in the future
     const remoteAudioRef = useRef();
+    const localId = useRef(`user_${Date.now()}`).current; // A simple unique ID for this user session
 
     useEffect(() => {
-        if (!db) {
-          console.error("Firestore is not initialized.");
+        if (!db || !localStream) {
+          console.error("Firestore or local stream is not available.");
           return;
         }
         
         const roomRef = doc(db, 'rooms', roomId);
-        const callerCandidates = collection(roomRef, 'callerCandidates');
-        const calleeCandidates = collection(roomRef, 'calleeCandidates');
         let unsubscribes = [];
 
-        const setupWebRTC = async () => {
-            localStream.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-            
-            localStream.current.getTracks().forEach(track => {
-                pc.current.addTrack(track, localStream.current);
-            });
-
-            pc.current.ontrack = event => {
-                if (remoteAudioRef.current) {
-                    remoteAudioRef.current.srcObject = event.streams[0];
+        // --- FIX: Add robust connection state monitoring ---
+        const handleConnectionStateChange = (peerId, connection) => {
+            console.log(`Peer ${peerId} connection state: ${connection.connectionState}`);
+            if (connection.connectionState === 'connected') {
+                setParticipants(prev => {
+                    // Update existing or add new participant
+                    const existing = prev.find(p => p.id === peerId);
+                    if (existing) {
+                        return prev.map(p => p.id === peerId ? { ...p, connected: true } : p);
+                    }
+                    return [...prev, { id: peerId, name: 'Guest', connected: true }];
+                });
+            } else if (['disconnected', 'failed', 'closed'].includes(connection.connectionState)) {
+                setParticipants(prev => prev.filter(p => p.id !== peerId));
+                if (peerConnections.current.has(peerId)) {
+                    peerConnections.current.get(peerId).close();
+                    peerConnections.current.delete(peerId);
                 }
-            };
-            
-            const roomDoc = await getDoc(roomRef);
+            }
+        };
 
-            if (!roomDoc.data()?.offer) {
-                setParticipants([{ id: 'caller', name: 'You' }]);
-                pc.current.onicecandidate = event => event.candidate && addDoc(callerCandidates, event.candidate.toJSON());
-                const offerDescription = await pc.current.createOffer();
-                await pc.current.setLocalDescription(offerDescription);
-                await setDoc(roomRef, { offer: { sdp: offerDescription.sdp, type: offerDescription.type } });
+        const setupWebRTC = async () => {
+             // Add self to the UI immediately
+            setParticipants([{ id: localId, name: 'You', connected: true }]);
+
+            const roomDoc = await getDoc(roomRef);
+            const roomData = roomDoc.data();
+
+            if (!roomData.offer) { // This user is the caller/host
+                const pc = new RTCPeerConnection(servers);
+                peerConnections.current.set('callee', pc); // For a 2-person chat
+                
+                pc.onconnectionstatechange = () => handleConnectionStateChange('callee', pc);
+                
+                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+                pc.ontrack = event => {
+                    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = event.streams[0];
+                };
+
+                const callerCandidates = collection(roomRef, 'callerCandidates');
+                pc.onicecandidate = event => event.candidate && addDoc(callerCandidates, event.candidate.toJSON());
+                
+                const offerDescription = await pc.createOffer();
+                await pc.setLocalDescription(offerDescription);
+                await setDoc(roomRef, { offer: { sdp: offerDescription.sdp, type: offerDescription.type } }, { merge: true });
 
                 unsubscribes.push(onSnapshot(roomRef, (snapshot) => {
                     const data = snapshot.data();
-                    if (!pc.current.currentRemoteDescription && data?.answer) {
-                        pc.current.setRemoteDescription(new RTCSessionDescription(data.answer));
-                        setParticipants(prev => [...prev, { id: 'callee', name: 'Guest' }]);
+                    if (!pc.currentRemoteDescription && data?.answer) {
+                        pc.setRemoteDescription(new RTCSessionDescription(data.answer));
                     }
                 }));
-
+                
+                const calleeCandidates = collection(roomRef, 'calleeCandidates');
                 unsubscribes.push(onSnapshot(calleeCandidates, snapshot => {
-                    snapshot.docChanges().forEach(change => change.type === 'added' && pc.current.addIceCandidate(new RTCIceCandidate(change.doc.data())));
+                    snapshot.docChanges().forEach(change => {
+                        if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+                    });
                 }));
 
-            } else {
-                setParticipants([{ id: 'caller', name: 'Host' }, { id: 'callee', name: 'You' }]);
-                pc.current.onicecandidate = event => event.candidate && addDoc(calleeCandidates, event.candidate.toJSON());
-                await pc.current.setRemoteDescription(new RTCSessionDescription(roomDoc.data().offer));
-                const answerDescription = await pc.current.createAnswer();
-                await pc.current.setLocalDescription(answerDescription);
+            } else { // This user is the callee/guest
+                const pc = new RTCPeerConnection(servers);
+                peerConnections.current.set('caller', pc);
+
+                pc.onconnectionstatechange = () => handleConnectionStateChange('caller', pc);
+
+                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+                pc.ontrack = event => {
+                    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = event.streams[0];
+                };
+                
+                const calleeCandidates = collection(roomRef, 'calleeCandidates');
+                pc.onicecandidate = event => event.candidate && addDoc(calleeCandidates, event.candidate.toJSON());
+                
+                await pc.setRemoteDescription(new RTCSessionDescription(roomData.offer));
+                const answerDescription = await pc.createAnswer();
+                await pc.setLocalDescription(answerDescription);
                 await updateDoc(roomRef, { answer: { sdp: answerDescription.sdp, type: answerDescription.type } });
 
+                const callerCandidates = collection(roomRef, 'callerCandidates');
                 unsubscribes.push(onSnapshot(callerCandidates, snapshot => {
-                    snapshot.docChanges().forEach(change => change.type === 'added' && pc.current.addIceCandidate(new RTCIceCandidate(change.doc.data())));
+                    snapshot.docChanges().forEach(change => {
+                        if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+                    });
                 }));
             }
         };
@@ -281,22 +359,42 @@ const ChatRoom = ({ roomId, voiceEffect, onLeave }) => {
         
         return () => {
             unsubscribes.forEach(unsub => unsub());
-            if (localStream.current) localStream.current.getTracks().forEach(track => track.stop());
-            if (pc.current) pc.current.close();
+            peerConnections.current.forEach(pc => pc.close());
+            peerConnections.current.clear();
+            // The stream itself is managed by the parent App component
         };
-    }, [roomId]);
+    }, [roomId, localStream, localId]);
     
+    // --- FIX: Improved leave logic ---
     const handleLeave = async () => {
+        // Instead of deleting the whole room, just clear signaling info
+        // This is a simplified approach. A more robust system would handle this on the server.
         if (db) {
-            const roomRef = doc(db, 'rooms', roomId);
-            await deleteDoc(roomRef).catch(console.error);
+            try {
+                const roomRef = doc(db, 'rooms', roomId);
+                // Clear offer/answer and candidates to allow room reuse or prevent stale data
+                await updateDoc(roomRef, { offer: null, answer: null });
+
+                // Use a batch to delete subcollections
+                const callerCandidatesQuery = collection(roomRef, 'callerCandidates');
+                const calleeCandidatesQuery = collection(roomRef, 'calleeCandidates');
+                const callerSnapshot = await getDoc(callerCandidatesQuery);
+                const calleeSnapshot = await getDoc(calleeCandidatesQuery);
+                const batch = writeBatch(db);
+                callerSnapshot.docs.forEach(doc => batch.delete(doc.ref));
+                calleeSnapshot.docs.forEach(doc => batch.delete(doc.ref));
+                await batch.commit();
+
+            } catch (error) {
+                console.error("Error cleaning up room:", error);
+            }
         }
         onLeave();
     }
     
     const toggleMute = () => {
-        if(localStream.current){
-            localStream.current.getAudioTracks()[0].enabled = !isMuted;
+        if(localStream){
+            localStream.getAudioTracks()[0].enabled = !isMuted;
             setIsMuted(!isMuted);
         }
     }
@@ -315,11 +413,12 @@ const ChatRoom = ({ roomId, voiceEffect, onLeave }) => {
 
       <div className="flex-grow bg-gray-900 rounded-lg p-4 grid grid-cols-2 md:grid-cols-3 gap-4 auto-rows-min">
         {participants.map(p => (
-            <div key={p.id} className={`p-4 rounded-lg flex flex-col items-center justify-center bg-gray-700`}>
-                <div className="w-16 h-16 bg-indigo-500 rounded-full mb-3 flex items-center justify-center text-2xl font-bold">
+            <div key={p.id} className={`p-4 rounded-lg flex flex-col items-center justify-center transition-all ${p.connected ? 'bg-gray-700' : 'bg-gray-800 opacity-50'}`}>
+                <div className={`w-16 h-16 rounded-full mb-3 flex items-center justify-center text-2xl font-bold transition-colors ${p.connected ? 'bg-indigo-500' : 'bg-gray-600'}`}>
                     {p.name.charAt(0)}
                 </div>
                 <p className="font-semibold">{p.name}</p>
+                <p className="text-xs text-gray-400">{p.connected ? 'Connected' : 'Connecting...'}</p>
             </div>
         ))}
       </div>
