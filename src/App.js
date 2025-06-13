@@ -152,6 +152,7 @@ const AudioProcessor = ({ voiceEffect, originalStream }) => {
   const { room } = useLiveKitRoom();
 
   useEffect(() => {
+    // This effect runs when the component mounts within the LiveKitRoom
     if (!room || !originalStream || voiceEffect === 'none') return;
 
     let audioContext;
@@ -160,6 +161,7 @@ const AudioProcessor = ({ voiceEffect, originalStream }) => {
     const setupAndPublish = async () => {
       try {
         const originalTrack = originalStream.getAudioTracks()[0];
+        // Create the audio processing pipeline using the stream from the lobby
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
         const source = audioContext.createMediaStreamSource(new MediaStream([originalTrack]));
         const destination = audioContext.createMediaStreamDestination();
@@ -173,6 +175,7 @@ const AudioProcessor = ({ voiceEffect, originalStream }) => {
 
         processedTrack = destination.stream.getAudioTracks()[0];
         
+        // Publish the processed track to the room
         await room.localParticipant.publishTrack(processedTrack, {
             name: 'microphone',
             source: Track.Source.Microphone,
@@ -184,6 +187,7 @@ const AudioProcessor = ({ voiceEffect, originalStream }) => {
 
     setupAndPublish();
 
+    // Cleanup function: runs when the component unmounts (e.g., leaving the room)
     return () => {
       if (processedTrack) {
         room.localParticipant.unpublishTrack(processedTrack);
@@ -194,7 +198,7 @@ const AudioProcessor = ({ voiceEffect, originalStream }) => {
     };
   }, [room, voiceEffect, originalStream]);
 
-  return null;
+  return null; // This component doesn't render anything
 };
 
 // --- Chat Room Component ---
@@ -203,6 +207,7 @@ const ChatRoom = ({ roomId, onLeave, voiceEffect, originalStream }) => {
   const [token, setToken] = useState(null);
   const serverUrl = process.env.REACT_APP_LIVEKIT_URL;
 
+  // Fetch the access token from our serverless function
   useEffect(() => {
     const fetchToken = async () => {
       try {
@@ -224,6 +229,7 @@ const ChatRoom = ({ roomId, onLeave, voiceEffect, originalStream }) => {
 
   const tracks = useTracks([Track.Source.Camera, Track.Source.Microphone], { onlySubscribed: false });
 
+  // Show a loading state while fetching the token
   if (!token) {
     return (
         <div className="w-full max-w-lg text-center mx-auto bg-gray-800 p-8 rounded-2xl shadow-lg">
@@ -238,6 +244,8 @@ const ChatRoom = ({ roomId, onLeave, voiceEffect, originalStream }) => {
             token={token}
             serverUrl={serverUrl}
             connect={true}
+            // Let LiveKit handle audio only if no effect is selected.
+            // Otherwise, our AudioProcessor component will handle it.
             audio={voiceEffect === 'none'} 
             video={false}
             onDisconnected={onLeave}
@@ -247,6 +255,8 @@ const ChatRoom = ({ roomId, onLeave, voiceEffect, originalStream }) => {
               <ParticipantTile />
             </GridLayout>
             <ControlBar controls={{ microphone: true, camera: false, screenShare: false, leave: true }} onLeave={onLeave}/>
+            
+            {/* Conditionally render our audio processor if an effect is chosen */}
             {voiceEffect !== 'none' && <AudioProcessor voiceEffect={voiceEffect} originalStream={originalStream} />}
         </LiveKitRoom>
     </div>
