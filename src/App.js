@@ -1,50 +1,53 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   LiveKitRoom,
   AudioConference,
   ControlBar
 } from '@livekit/components-react';
 import '@livekit/components-styles';
+import { AccessToken } from 'livekit-server-sdk'; // Import for client-side token generation
 
 // --- Main App Component ---
 export default function App() {
   const [roomId, setRoomId] = useState('');
-  const [token, setToken] = useState(null); // NEW: Token is now in component state
+  const [token, setToken] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Get the LiveKit Server URL from Vercel Environment Variables
+  // Get the LiveKit Server URL and credentials from Vercel Environment Variables
   const serverUrl = process.env.REACT_APP_LIVEKIT_URL;
+  const apiKey = process.env.REACT_APP_LIVEKIT_API_KEY;
+  const apiSecret = process.env.REACT_APP_LIVEKIT_API_SECRET;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (roomId.trim()) {
       setIsLoading(true);
+
+      if (!apiKey || !apiSecret) {
+        alert("LiveKit API Key or Secret is not configured. Please check your Vercel Environment Variables.");
+        setIsLoading(false);
+        return;
+      }
+      
       // Generate a simple random identity for the user
       const identity = `user-${Math.random().toString(36).substring(7)}`;
 
-      try {
-        // 1. Fetch the token MANUALLY from our serverless function
-        const resp = await fetch(`/api/getToken?roomName=${roomId}&identity=${identity}`);
-        const data = await resp.json();
-        
-        if (data.token) {
-          // 2. Store the token in state, which will trigger the render of LiveKitRoom
-          setToken(data.token);
-        } else {
-          console.error("Failed to get a token:", data.error);
-          alert("Could not get access token. Please check server logs.");
-        }
-      } catch (err) {
-        console.error("Error fetching token:", err);
-        alert("There was an error fetching the access token.");
-      } finally {
-        setIsLoading(false);
-      }
+      // --- FIX: Generate token on the client-side for this workaround ---
+      const at = new AccessToken(apiKey, apiSecret, { identity });
+      at.addGrant({ 
+        room: roomId, 
+        roomJoin: true, 
+        canPublish: true, 
+        canSubscribe: true 
+      });
+      const generatedToken = await at.toJwt();
+      setToken(generatedToken);
+      
+      setIsLoading(false);
     }
   };
 
   const handleLeave = () => {
-    // Clear the token to exit the room and return to the join form
     setToken(null); 
     setRoomId('');
   }
@@ -65,14 +68,11 @@ export default function App() {
           token={token}
           serverUrl={serverUrl}
           connect={true}
-          audio={true} // Now that we have a token, LiveKit can safely ask for the mic
+          audio={true}
           video={false}
           onDisconnected={handleLeave}
         >
-          {/* AudioConference handles the grid layout, participant tiles, and talking indicators. */}
           <AudioConference />
-          
-          {/* ControlBar provides mute, leave, etc. */}
           <ControlBar controls={{ microphone: true, camera: false, screenShare: false, leave: true }} />
         </LiveKitRoom>
       </div>
