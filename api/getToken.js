@@ -1,7 +1,7 @@
 // File: /api/getToken.js
-// Using CommonJS syntax ('require') which is compatible with Create React App's default serverless function environment on Vercel.
 const { AccessToken } = require('livekit-server-sdk');
 
+// This is a Vercel Serverless Function using standard CommonJS syntax.
 module.exports = async (req, res) => {
   const { roomName, identity } = req.query;
 
