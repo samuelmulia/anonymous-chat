@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   LiveKitRoom,
   GridLayout,
@@ -15,24 +15,18 @@ export default function App() {
   const [page, setPage] = useState('landing');
   const [roomId, setRoomId] = useState('');
   const [voiceEffect, setVoiceEffect] = useState('none');
-  const [originalStream, setOriginalStream] = useState(null);
-
+  
   const goToLobby = (id) => {
     setRoomId(id);
     setPage('lobby');
   };
 
-  const goToChat = (stream, effect) => {
-    setOriginalStream(stream);
+  const goToChat = (effect) => {
     setVoiceEffect(effect);
     setPage('chat');
   };
 
   const leaveRoom = () => {
-    if (originalStream) {
-        originalStream.getTracks().forEach(track => track.stop());
-        setOriginalStream(null);
-    }
     setRoomId('');
     setVoiceEffect('none');
     setPage('landing');
@@ -45,7 +39,7 @@ export default function App() {
       case 'lobby':
         return <Lobby roomId={roomId} onGoToChat={goToChat} />;
       case 'chat':
-        return <ChatRoom roomId={roomId} voiceEffect={voiceEffect} onLeave={leaveRoom} originalStream={originalStream} />;
+        return <ChatRoom roomId={roomId} voiceEffect={voiceEffect} onLeave={leaveRoom} />;
       default:
         return <LandingPage onGoToLobby={goToLobby} />;
     }
@@ -104,19 +98,22 @@ const LandingPage = ({ onGoToLobby }) => {
 const Lobby = ({ roomId, onGoToChat }) => {
     const [micError, setMicError] = useState('');
     const [voiceEffect, setVoiceEffect] = useState('none');
-    const [isJoining, setIsJoining] = useState(false);
+    const [isCheckingMic, setIsCheckingMic] = useState(false);
     
-    // In the lobby, we get the original stream once and pass it along with the effect choice.
+    // In the lobby, we just get mic permission and pass the effect choice.
     const handleJoinChat = async () => {
-        setIsJoining(true);
+        setIsCheckingMic(true);
         setMicError('');
         try {
+            // Test getting the microphone to trigger the permission prompt.
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            onGoToChat(stream, voiceEffect);
+            // We can stop the track immediately. LiveKit will ask for it again in the room.
+            stream.getTracks().forEach(track => track.stop());
+            onGoToChat(voiceEffect);
         } catch (err) {
              console.error("Error accessing microphone:", err);
              setMicError(`Error: ${err.message}. Please check your browser/system permissions.`);
-             setIsJoining(false);
+             setIsCheckingMic(false);
         }
     };
   
@@ -139,8 +136,8 @@ const Lobby = ({ roomId, onGoToChat }) => {
           
           {micError && <p className="text-red-500 mb-4">{micError}</p>}
     
-          <button onClick={handleJoinChat} disabled={isJoining} className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg transition duration-300 disabled:bg-gray-500 disabled:cursor-not-allowed">
-            {isJoining ? 'Getting Mic...' : 'Join Chat'}
+          <button onClick={handleJoinChat} disabled={isCheckingMic} className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg transition duration-300 disabled:bg-gray-500 disabled:cursor-not-allowed">
+            {isCheckingMic ? 'Checking Mic...' : 'Join Chat'}
           </button>
         </div>
       );
@@ -148,20 +145,24 @@ const Lobby = ({ roomId, onGoToChat }) => {
 
 
 // --- Best Practice: Audio Processor Component ---
-const AudioProcessor = ({ voiceEffect, originalStream }) => {
+const AudioProcessor = ({ voiceEffect }) => {
   const { room } = useLiveKitRoom();
 
   useEffect(() => {
     // This effect runs when the component mounts within the LiveKitRoom
-    if (!room || !originalStream || voiceEffect === 'none') return;
+    if (!room || voiceEffect === 'none') return;
 
     let audioContext;
+    let originalStream;
     let processedTrack;
-    
+
     const setupAndPublish = async () => {
       try {
+        // Get the user's microphone stream
+        originalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const originalTrack = originalStream.getAudioTracks()[0];
-        // Create the audio processing pipeline using the stream from the lobby
+
+        // Create the audio processing pipeline
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
         const source = audioContext.createMediaStreamSource(new MediaStream([originalTrack]));
         const destination = audioContext.createMediaStreamDestination();
@@ -181,7 +182,7 @@ const AudioProcessor = ({ voiceEffect, originalStream }) => {
             source: Track.Source.Microphone,
         });
       } catch (error) {
-        console.error("Failed to publish processed track:", error);
+        console.error("Failed to get mic or publish processed track:", error);
       }
     };
 
@@ -192,17 +193,20 @@ const AudioProcessor = ({ voiceEffect, originalStream }) => {
       if (processedTrack) {
         room.localParticipant.unpublishTrack(processedTrack);
       }
+      if (originalStream) {
+        originalStream.getTracks().forEach(track => track.stop());
+      }
       if (audioContext) {
         audioContext.close();
       }
     };
-  }, [room, voiceEffect, originalStream]);
+  }, [room, voiceEffect]);
 
   return null; // This component doesn't render anything
 };
 
 // --- Chat Room Component ---
-const ChatRoom = ({ roomId, onLeave, voiceEffect, originalStream }) => {
+const ChatRoom = ({ roomId, onLeave, voiceEffect }) => {
   const [identity] = useState(`user-${Math.random().toString(36).substring(7)}`);
   const [token, setToken] = useState(null);
   const serverUrl = process.env.REACT_APP_LIVEKIT_URL;
@@ -257,7 +261,7 @@ const ChatRoom = ({ roomId, onLeave, voiceEffect, originalStream }) => {
             <ControlBar controls={{ microphone: true, camera: false, screenShare: false, leave: true }} onLeave={onLeave}/>
             
             {/* Conditionally render our audio processor if an effect is chosen */}
-            {voiceEffect !== 'none' && <AudioProcessor voiceEffect={voiceEffect} originalStream={originalStream} />}
+            {voiceEffect !== 'none' && <AudioProcessor voiceEffect={voiceEffect} />}
         </LiveKitRoom>
     </div>
   );
