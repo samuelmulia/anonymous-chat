@@ -3,8 +3,6 @@ import { initializeApp } from 'firebase/app';
 import { getFirestore, doc, getDoc, setDoc, addDoc, collection, onSnapshot, updateDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 
 // --- Firebase Configuration ---
-// This will be filled in by Vercel's Environment Variables during deployment.
-// This code is designed to work even if the keys are missing locally.
 const firebaseConfig = {
   apiKey: process.env.REACT_APP_APIKEY,
   authDomain: process.env.REACT_APP_AUTHDOMAIN,
@@ -15,7 +13,6 @@ const firebaseConfig = {
 };
 
 // --- Initialize Firebase ---
-// This structure prevents errors if the config is missing during local development.
 let db;
 try {
   if (firebaseConfig.apiKey) {
@@ -42,7 +39,6 @@ const App = () => {
   const [roomId, setRoomId] = useState('');
   const [voiceEffect, setVoiceEffect] = useState('none');
   const [error, setError] = useState('');
-  // Use a ref to hold the local stream to pass it between Lobby and ChatRoom
   const localStreamRef = useRef(null); 
 
   useEffect(() => {
@@ -57,13 +53,11 @@ const App = () => {
   };
 
   const goToChat = (stream) => {
-    // *** FIX: Pass the stream acquired in the lobby to the chat room ***
     localStreamRef.current = stream;
     setPage('chat');
   };
 
   const leaveRoom = () => {
-    // Clean up stream when leaving the room completely
     if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
         localStreamRef.current = null;
@@ -77,10 +71,8 @@ const App = () => {
       case 'landing':
         return <LandingPage onGoToLobby={goToLobby} />;
       case 'lobby':
-        // *** FIX: Pass the goToChat function to the lobby ***
         return <Lobby roomId={roomId} onGoToChat={goToChat} voiceEffect={voiceEffect} setVoiceEffect={setVoiceEffect} />;
       case 'chat':
-        // *** FIX: Pass the acquired local stream to the ChatRoom ***
         return <ChatRoom roomId={roomId} voiceEffect={voiceEffect} onLeave={leaveRoom} localStream={localStreamRef.current} />;
       default:
         return <LandingPage onGoToLobby={goToLobby} />;
@@ -110,8 +102,7 @@ const LandingPage = ({ onGoToLobby }) => {
     setIsCreating(true);
     try {
         const roomRef = collection(db, 'rooms');
-        // Initialize room with a 'connected' map for participants
-        const newRoomRef = await addDoc(roomRef, { connected: {} }); 
+        const newRoomRef = await addDoc(roomRef, { createdAt: new Date() }); 
         onGoToLobby(newRoomRef.id);
     } catch (error) {
         console.error("Error creating room: ", error);
@@ -151,7 +142,6 @@ const LandingPage = ({ onGoToLobby }) => {
   );
 };
 
-
 // --- Lobby Component ---
 const Lobby = ({ roomId, onGoToChat, voiceEffect, setVoiceEffect }) => {
     const [micLevel, setMicLevel] = useState(0);
@@ -160,7 +150,6 @@ const Lobby = ({ roomId, onGoToChat, voiceEffect, setVoiceEffect }) => {
     const localStreamRef = useRef(null);
     const animationFrameId = useRef(null);
     
-    // --- FIX: Microphone access is now initiated by a user click ---
     const handleJoinChat = async () => {
         if (!isMicAccessGranted) {
              setMicError('Please grant microphone access first.');
@@ -178,9 +167,8 @@ const Lobby = ({ roomId, onGoToChat, voiceEffect, setVoiceEffect }) => {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
             localStreamRef.current = stream;
             setIsMicAccessGranted(true);
-            setMicError(''); // Clear any previous errors
+            setMicError('');
             
-            // Setup visualization
             const context = new (window.AudioContext || window.webkitAudioContext)();
             const source = context.createMediaStreamSource(stream);
             const analyser = context.createAnalyser();
@@ -204,10 +192,8 @@ const Lobby = ({ roomId, onGoToChat, voiceEffect, setVoiceEffect }) => {
     };
 
     useEffect(() => {
-      // Cleanup function to stop tracks and animation when the component unmounts
       return () => {
           if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
-          // Don't stop the stream here, it's passed to the chat room
       }
     }, []);
   
@@ -251,106 +237,126 @@ const Lobby = ({ roomId, onGoToChat, voiceEffect, setVoiceEffect }) => {
 
 // --- Chat Room Component ---
 const ChatRoom = ({ roomId, voiceEffect, onLeave, localStream }) => {
-    // --- FIX: Use a more robust state for participants ---
     const [participants, setParticipants] = useState([]);
     const [isMuted, setIsMuted] = useState(false);
-    const peerConnections = useRef(new Map()); // Use a map to handle multiple peers in the future
+    const [connectionStatus, setConnectionStatus] = useState('connecting');
+    const pc = useRef(new RTCPeerConnection(servers));
     const remoteAudioRef = useRef();
-    const localId = useRef(`user_${Date.now()}`).current; // A simple unique ID for this user session
+    
+    // --- FIX: Add role management and more robust state ---
+    const localId = useRef(`user_${Date.now()}`).current;
+    const role = useRef(null); // 'caller' or 'callee'
 
     useEffect(() => {
         if (!db || !localStream) {
           console.error("Firestore or local stream is not available.");
+          setConnectionStatus('failed');
           return;
         }
         
         const roomRef = doc(db, 'rooms', roomId);
         let unsubscribes = [];
 
-        // --- FIX: Add robust connection state monitoring ---
-        const handleConnectionStateChange = (peerId, connection) => {
-            console.log(`Peer ${peerId} connection state: ${connection.connectionState}`);
-            if (connection.connectionState === 'connected') {
-                setParticipants(prev => {
-                    // Update existing or add new participant
-                    const existing = prev.find(p => p.id === peerId);
-                    if (existing) {
-                        return prev.map(p => p.id === peerId ? { ...p, connected: true } : p);
-                    }
-                    return [...prev, { id: peerId, name: 'Guest', connected: true }];
-                });
-            } else if (['disconnected', 'failed', 'closed'].includes(connection.connectionState)) {
-                setParticipants(prev => prev.filter(p => p.id !== peerId));
-                if (peerConnections.current.has(peerId)) {
-                    peerConnections.current.get(peerId).close();
-                    peerConnections.current.delete(peerId);
-                }
+        // --- FIX: Add ICE restart logic ---
+        const handleConnectionStateChange = async () => {
+            console.log(`Connection state: ${pc.current.connectionState}`);
+            setConnectionStatus(pc.current.connectionState);
+            
+            if (pc.current.connectionState === 'connected') {
+                const roomDoc = await getDoc(roomRef);
+                const roomData = roomDoc.data();
+                const remoteRole = role.current === 'caller' ? 'callee' : 'caller';
+                setParticipants([
+                    {id: localId, name: 'You'},
+                    {id: roomData[remoteRole], name: 'Guest'}
+                ]);
+            }
+
+            // This triggers an ICE restart if the connection fails
+            if (pc.current.connectionState === 'failed') {
+                await pc.current.createOffer({ iceRestart: true });
+            }
+        };
+        
+        // --- FIX: Add negotiation needed logic ---
+        // This handles re-negotiation for ICE restarts
+        const handleNegotiationNeeded = async () => {
+            if (role.current !== 'caller') return; // Only caller initiates offers
+            console.log('Negotiation needed, creating offer...');
+            try {
+                const offer = await pc.current.createOffer();
+                await pc.current.setLocalDescription(offer);
+                await updateDoc(roomRef, { offer: { sdp: offer.sdp, type: offer.type } });
+            } catch (err) {
+                console.error('Error during negotiation:', err);
             }
         };
 
         const setupWebRTC = async () => {
-             // Add self to the UI immediately
-            setParticipants([{ id: localId, name: 'You', connected: true }]);
+            pc.current.onconnectionstatechange = handleConnectionStateChange;
+            pc.current.onnegotiationneeded = handleNegotiationNeeded;
 
+            localStream.getTracks().forEach(track => {
+                pc.current.addTrack(track, localStream);
+            });
+
+            pc.current.ontrack = event => {
+                if (remoteAudioRef.current && event.streams[0]) {
+                    remoteAudioRef.current.srcObject = event.streams[0];
+                }
+            };
+            
             const roomDoc = await getDoc(roomRef);
             const roomData = roomDoc.data();
 
-            if (!roomData.offer) { // This user is the caller/host
-                const pc = new RTCPeerConnection(servers);
-                peerConnections.current.set('callee', pc); // For a 2-person chat
+            if (!roomData.caller) { // This user is the first one, becomes the caller
+                role.current = 'caller';
+                setParticipants([{id: localId, name: 'You'}]);
                 
-                pc.onconnectionstatechange = () => handleConnectionStateChange('callee', pc);
-                
-                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-                pc.ontrack = event => {
-                    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = event.streams[0];
-                };
-
+                // Set up ICE candidate listener
                 const callerCandidates = collection(roomRef, 'callerCandidates');
-                pc.onicecandidate = event => event.candidate && addDoc(callerCandidates, event.candidate.toJSON());
+                pc.current.onicecandidate = event => event.candidate && addDoc(callerCandidates, event.candidate.toJSON());
                 
-                const offerDescription = await pc.createOffer();
-                await pc.setLocalDescription(offerDescription);
-                await setDoc(roomRef, { offer: { sdp: offerDescription.sdp, type: offerDescription.type } }, { merge: true });
-
+                // Set this user as the caller in Firestore
+                await updateDoc(roomRef, { caller: localId });
+                
+                // Listen for an answer from the callee
                 unsubscribes.push(onSnapshot(roomRef, (snapshot) => {
                     const data = snapshot.data();
-                    if (!pc.currentRemoteDescription && data?.answer) {
-                        pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                    if (!pc.current.currentRemoteDescription && data?.answer) {
+                        console.log('Got answer, setting remote description');
+                        pc.current.setRemoteDescription(new RTCSessionDescription(data.answer));
                     }
                 }));
-                
+
+                // Listen for ICE candidates from the callee
                 const calleeCandidates = collection(roomRef, 'calleeCandidates');
                 unsubscribes.push(onSnapshot(calleeCandidates, snapshot => {
-                    snapshot.docChanges().forEach(change => {
-                        if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
-                    });
+                    snapshot.docChanges().forEach(change => change.type === 'added' && pc.current.addIceCandidate(new RTCIceCandidate(change.doc.data())));
                 }));
 
-            } else { // This user is the callee/guest
-                const pc = new RTCPeerConnection(servers);
-                peerConnections.current.set('caller', pc);
-
-                pc.onconnectionstatechange = () => handleConnectionStateChange('caller', pc);
-
-                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-                pc.ontrack = event => {
-                    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = event.streams[0];
-                };
+            } else { // This user is the second one, becomes the callee
+                role.current = 'callee';
                 
+                // Set up ICE candidate listener
                 const calleeCandidates = collection(roomRef, 'calleeCandidates');
-                pc.onicecandidate = event => event.candidate && addDoc(calleeCandidates, event.candidate.toJSON());
+                pc.current.onicecandidate = event => event.candidate && addDoc(calleeCandidates, event.candidate.toJSON());
                 
-                await pc.setRemoteDescription(new RTCSessionDescription(roomData.offer));
-                const answerDescription = await pc.createAnswer();
-                await pc.setLocalDescription(answerDescription);
-                await updateDoc(roomRef, { answer: { sdp: answerDescription.sdp, type: answerDescription.type } });
-
+                // Set remote description from the offer
+                await pc.current.setRemoteDescription(new RTCSessionDescription(roomData.offer));
+                
+                // Create and set answer
+                const answerDescription = await pc.current.createAnswer();
+                await pc.current.setLocalDescription(answerDescription);
+                await updateDoc(roomRef, { 
+                    answer: { sdp: answerDescription.sdp, type: answerDescription.type },
+                    callee: localId
+                });
+                
+                // Listen for ICE candidates from the caller
                 const callerCandidates = collection(roomRef, 'callerCandidates');
                 unsubscribes.push(onSnapshot(callerCandidates, snapshot => {
-                    snapshot.docChanges().forEach(change => {
-                        if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
-                    });
+                    snapshot.docChanges().forEach(change => change.type === 'added' && pc.current.addIceCandidate(new RTCIceCandidate(change.doc.data())));
                 }));
             }
         };
@@ -359,31 +365,27 @@ const ChatRoom = ({ roomId, voiceEffect, onLeave, localStream }) => {
         
         return () => {
             unsubscribes.forEach(unsub => unsub());
-            peerConnections.current.forEach(pc => pc.close());
-            peerConnections.current.clear();
-            // The stream itself is managed by the parent App component
+            if (pc.current) {
+                pc.current.close();
+            }
         };
     }, [roomId, localStream, localId]);
     
-    // --- FIX: Improved leave logic ---
+    // --- FIX: More robust leave logic ---
     const handleLeave = async () => {
-        // Instead of deleting the whole room, just clear signaling info
-        // This is a simplified approach. A more robust system would handle this on the server.
         if (db) {
             try {
                 const roomRef = doc(db, 'rooms', roomId);
-                // Clear offer/answer and candidates to allow room reuse or prevent stale data
-                await updateDoc(roomRef, { offer: null, answer: null });
+                const roomDoc = await getDoc(roomRef);
+                if (!roomDoc.exists()) {
+                    onLeave();
+                    return;
+                }
 
-                // Use a batch to delete subcollections
-                const callerCandidatesQuery = collection(roomRef, 'callerCandidates');
-                const calleeCandidatesQuery = collection(roomRef, 'calleeCandidates');
-                const callerSnapshot = await getDoc(callerCandidatesQuery);
-                const calleeSnapshot = await getDoc(calleeCandidatesQuery);
-                const batch = writeBatch(db);
-                callerSnapshot.docs.forEach(doc => batch.delete(doc.ref));
-                calleeSnapshot.docs.forEach(doc => batch.delete(doc.ref));
-                await batch.commit();
+                // Delete the entire room document on leave.
+                // This is a simple but effective strategy for a two-person chat
+                // to ensure no stale data prevents rejoining.
+                await deleteDoc(roomRef);
 
             } catch (error) {
                 console.error("Error cleaning up room:", error);
@@ -404,21 +406,20 @@ const ChatRoom = ({ roomId, voiceEffect, onLeave, localStream }) => {
       <div className="flex justify-between items-center mb-4">
         <div>
             <h2 className="text-2xl font-bold">Room: <span className="text-indigo-400 font-mono text-xl">{roomId}</span></h2>
-            <p className="text-gray-400">Your voice effect: <span className="font-semibold capitalize text-indigo-400">{voiceEffect}</span></p>
+            <p className="text-gray-400 capitalize">Status: <span className="font-semibold text-indigo-400">{connectionStatus}</span></p>
         </div>
         <button onClick={handleLeave} className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300">
           Leave Room
         </button>
       </div>
 
-      <div className="flex-grow bg-gray-900 rounded-lg p-4 grid grid-cols-2 md:grid-cols-3 gap-4 auto-rows-min">
+      <div className="flex-grow bg-gray-900 rounded-lg p-4 grid grid-cols-2 md:grid-cols-3 gap-4 auto-rows-min content-start">
         {participants.map(p => (
-            <div key={p.id} className={`p-4 rounded-lg flex flex-col items-center justify-center transition-all ${p.connected ? 'bg-gray-700' : 'bg-gray-800 opacity-50'}`}>
-                <div className={`w-16 h-16 rounded-full mb-3 flex items-center justify-center text-2xl font-bold transition-colors ${p.connected ? 'bg-indigo-500' : 'bg-gray-600'}`}>
+            <div key={p.id} className={`p-4 rounded-lg flex flex-col items-center justify-center transition-all bg-gray-700`}>
+                <div className={`w-16 h-16 rounded-full mb-3 flex items-center justify-center text-2xl font-bold transition-colors bg-indigo-500`}>
                     {p.name.charAt(0)}
                 </div>
                 <p className="font-semibold">{p.name}</p>
-                <p className="text-xs text-gray-400">{p.connected ? 'Connected' : 'Connecting...'}</p>
             </div>
         ))}
       </div>
