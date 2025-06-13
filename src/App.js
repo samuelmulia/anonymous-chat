@@ -194,6 +194,22 @@ const ChatRoom = ({ roomId, onLeave, processedAudioStream }) => {
     { onlySubscribed: false }
   );
 
+  // --- FIX: Check if the stream from the lobby exists before continuing ---
+  if (!processedAudioStream) {
+    return (
+        <div className="text-red-500 text-center p-8 bg-gray-800 rounded-lg">
+            <h3 className="text-2xl font-bold mb-4">Microphone Not Ready</h3>
+            <p>Could not get your microphone stream. Please go back and try rejoining the room.</p>
+            <button onClick={onLeave} className="mt-6 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg">
+              Back to Lobby
+            </button>
+        </div>
+    );
+  }
+
+  // --- FIX: Extract the specific audio TRACK from the stream ---
+  const audioTrack = processedAudioStream.getAudioTracks()[0];
+
   if (!serverUrl) {
     return <div className="text-red-500">Error: LiveKit Server URL is not configured. Please set REACT_APP_LIVEKIT_URL.</div>
   }
@@ -211,8 +227,8 @@ const ChatRoom = ({ roomId, onLeave, processedAudioStream }) => {
             token={token}
             serverUrl={serverUrl}
             connect={true}
-            // Pass the processed audio stream to LiveKit
-            audio={processedAudioStream}
+            // --- FIX: Pass the specific audio TRACK, not the whole stream object ---
+            audio={audioTrack}
             video={false}
             onDisconnected={onLeave}
         >
