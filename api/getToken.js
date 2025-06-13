@@ -1,7 +1,8 @@
-import { AccessToken } from 'livekit-server-sdk';
+// File: /api/getToken.js
+// Using CommonJS syntax ('require') which is compatible with Create React App's default serverless function environment on Vercel.
+const { AccessToken } = require('livekit-server-sdk');
 
-// This is a Vercel Serverless Function using modern ES Module syntax.
-export default async function handler(req, res) {
+module.exports = async (req, res) => {
   const { roomName, identity } = req.query;
 
   if (typeof roomName !== 'string' || typeof identity !== 'string') {
@@ -9,6 +10,7 @@ export default async function handler(req, res) {
   }
 
   // These MUST be stored as Environment Variables on Vercel.
+  // They are NOT prefixed with REACT_APP_ because this is server code.
   const apiKey = process.env.LIVEKIT_API_KEY;
   const apiSecret = process.env.LIVEKIT_API_SECRET;
 
@@ -28,4 +30,4 @@ export default async function handler(req, res) {
   const token = await at.toJwt();
 
   res.status(200).json({ token });
-}
+};
