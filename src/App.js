@@ -52,7 +52,7 @@ export default function App() {
         </div>
     </div>
   );
-};
+}
 
 // --- Landing Page Component ---
 const LandingPage = ({ onGoToLobby }) => {
@@ -67,7 +67,7 @@ const LandingPage = ({ onGoToLobby }) => {
       if(joinRoomId.trim()){
           onGoToLobby(joinRoomId);
       }
-  }
+  };
 
   return (
     <div className="w-full max-w-md text-center mx-auto">
@@ -100,16 +100,19 @@ const Lobby = ({ roomId, onGoToChat }) => {
     const [voiceEffect, setVoiceEffect] = useState('none');
     const [isCheckingMic, setIsCheckingMic] = useState(false);
     
-    // In the lobby, we just get mic permission and pass the effect choice.
     const handleJoinChat = async () => {
         setIsCheckingMic(true);
         setMicError('');
         try {
             // Test getting the microphone to trigger the permission prompt.
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            // We can stop the track immediately. LiveKit will ask for it again in the room.
+            // Stop the tracks immediately - LiveKit will handle audio from here
             stream.getTracks().forEach(track => track.stop());
-            onGoToChat(voiceEffect);
+            
+            // Small delay to ensure cleanup before proceeding
+            setTimeout(() => {
+                onGoToChat(voiceEffect);
+            }, 100);
         } catch (err) {
              console.error("Error accessing microphone:", err);
              setMicError(`Error: ${err.message}. Please check your browser/system permissions.`);
@@ -143,126 +146,275 @@ const Lobby = ({ roomId, onGoToChat }) => {
       );
 };
 
-
-// --- Best Practice: Audio Processor Component ---
+// --- FIXED Audio Processor Component ---
 const AudioProcessor = ({ voiceEffect }) => {
   const { room } = useLiveKitRoom();
+  const [isProcessing, setIsProcessing] = useState(false);
 
   useEffect(() => {
-    // This effect runs when the component mounts within the LiveKitRoom
-    if (!room || voiceEffect === 'none') return;
+    if (!room || voiceEffect === 'none' || isProcessing) return;
 
     let audioContext;
     let originalStream;
     let processedTrack;
+    let source;
+    let filter;
+    let destination;
 
     const setupAndPublish = async () => {
       try {
-        // Get the user's microphone stream
-        originalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const originalTrack = originalStream.getAudioTracks()[0];
+        setIsProcessing(true);
+        console.log('Setting up audio processing for effect:', voiceEffect);
 
-        // Create the audio processing pipeline
+        // Wait a bit to ensure LiveKit is ready
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Get fresh microphone stream
+        originalStream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          } 
+        });
+        
+        const originalTrack = originalStream.getAudioTracks()[0];
+        if (!originalTrack) {
+          throw new Error('No audio track found');
+        }
+
+        // Create audio processing pipeline with better error handling
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        const source = audioContext.createMediaStreamSource(new MediaStream([originalTrack]));
-        const destination = audioContext.createMediaStreamDestination();
         
-        const biquadFilter = audioContext.createBiquadFilter();
-        biquadFilter.type = 'lowpass';
-        biquadFilter.detune.value = voiceEffect === 'male' ? -600 : 700;
+        // Resume context if suspended (required in some browsers)
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+
+        source = audioContext.createMediaStreamSource(new MediaStream([originalTrack]));
+        destination = audioContext.createMediaStreamDestination();
         
-        source.connect(biquadFilter);
-        biquadFilter.connect(destination);
+        // Create and configure the filter
+        filter = audioContext.createBiquadFilter();
+        filter.type = 'allpass'; // Changed from 'lowpass' to 'allpass' for better voice quality
+        
+        // Better frequency manipulation for voice effects
+        if (voiceEffect === 'male') {
+          filter.frequency.value = 300;
+          filter.Q.value = 0.5;
+        } else if (voiceEffect === 'female') {
+          filter.frequency.value = 1200;
+          filter.Q.value = 0.8;
+        }
+        
+        // Connect the audio nodes
+        source.connect(filter);
+        filter.connect(destination);
 
         processedTrack = destination.stream.getAudioTracks()[0];
         
-        // Publish the processed track to the room
+        if (!processedTrack) {
+          throw new Error('Failed to create processed audio track');
+        }
+
+        // Publish the processed track to LiveKit
         await room.localParticipant.publishTrack(processedTrack, {
             name: 'microphone',
             source: Track.Source.Microphone,
         });
+
+        console.log('Audio processing setup complete');
+        
       } catch (error) {
-        console.error("Failed to get mic or publish processed track:", error);
+        console.error("Failed to setup audio processing:", error);
+        setIsProcessing(false);
+        
+        // Fallback: let LiveKit handle audio normally
+        try {
+          if (originalStream) {
+            originalStream.getTracks().forEach(track => track.stop());
+          }
+        } catch (cleanupError) {
+          console.error("Error during cleanup:", cleanupError);
+        }
       }
     };
 
     setupAndPublish();
 
-    // Cleanup function: runs when the component unmounts (e.g., leaving the room)
+    // Cleanup function
     return () => {
-      if (processedTrack) {
-        room.localParticipant.unpublishTrack(processedTrack);
-      }
-      if (originalStream) {
-        originalStream.getTracks().forEach(track => track.stop());
-      }
-      if (audioContext) {
-        audioContext.close();
+      console.log('Cleaning up audio processor');
+      try {
+        if (processedTrack && room?.localParticipant) {
+          room.localParticipant.unpublishTrack(processedTrack);
+        }
+        if (originalStream) {
+          originalStream.getTracks().forEach(track => track.stop());
+        }
+        if (source) {
+          source.disconnect();
+        }
+        if (filter) {
+          filter.disconnect();
+        }
+        if (audioContext && audioContext.state !== 'closed') {
+          audioContext.close();
+        }
+      } catch (error) {
+        console.error("Error during audio processor cleanup:", error);
+      } finally {
+        setIsProcessing(false);
       }
     };
-  }, [room, voiceEffect]);
+  }, [room, voiceEffect, isProcessing]);
 
-  return null; // This component doesn't render anything
+  return null;
 };
 
-// --- Chat Room Component ---
+// --- FIXED Chat Room Component ---
 const ChatRoom = ({ roomId, onLeave, voiceEffect }) => {
   const [identity] = useState(`user-${Math.random().toString(36).substring(7)}`);
   const [token, setToken] = useState(null);
+  const [error, setError] = useState(null);
+  const [isConnecting, setIsConnecting] = useState(true);
+  
   const serverUrl = process.env.REACT_APP_LIVEKIT_URL;
 
-  // Fetch the access token from our serverless function
+  // Fetch the access token
   useEffect(() => {
     const fetchToken = async () => {
       try {
+        setIsConnecting(true);
+        setError(null);
+        
+        console.log('Fetching token for room:', roomId, 'identity:', identity);
+        
         const resp = await fetch(`/api/getToken?roomName=${roomId}&identity=${identity}`);
+        
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+        }
+        
         const data = await resp.json();
+        
         if (data.token) {
           setToken(data.token);
+          console.log('Token received successfully');
         } else {
-          console.error("Failed to get token:", data.error);
+          throw new Error(data.error || 'No token received');
         }
       } catch (err) {
         console.error("Error fetching token:", err);
+        setError(`Failed to connect: ${err.message}`);
+      } finally {
+        setIsConnecting(false);
       }
     };
-    if(roomId && identity) {
-        fetchToken();
+    
+    if (roomId && identity) {
+      fetchToken();
     }
   }, [roomId, identity]);
 
-  const tracks = useTracks([Track.Source.Camera, Track.Source.Microphone], { onlySubscribed: false });
-
-  // Show a loading state while fetching the token
-  if (!token) {
+  // Show error state
+  if (error) {
     return (
-        <div className="w-full max-w-lg text-center mx-auto bg-gray-800 p-8 rounded-2xl shadow-lg">
-            <h3 className="text-xl font-semibold">Connecting to room...</h3>
-        </div>
+      <div className="w-full max-w-lg text-center mx-auto bg-gray-800 p-8 rounded-2xl shadow-lg">
+        <h3 className="text-xl font-semibold text-red-400 mb-4">Connection Error</h3>
+        <p className="text-gray-300 mb-6">{error}</p>
+        <button 
+          onClick={onLeave}
+          className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300"
+        >
+          Back to Lobby
+        </button>
+      </div>
+    );
+  }
+
+  // Show loading state while fetching token
+  if (isConnecting || !token) {
+    return (
+      <div className="w-full max-w-lg text-center mx-auto bg-gray-800 p-8 rounded-2xl shadow-lg">
+        <h3 className="text-xl font-semibold mb-4">Connecting to room...</h3>
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-400 mx-auto"></div>
+      </div>
+    );
+  }
+
+  // Validate serverUrl
+  if (!serverUrl) {
+    return (
+      <div className="w-full max-w-lg text-center mx-auto bg-gray-800 p-8 rounded-2xl shadow-lg">
+        <h3 className="text-xl font-semibold text-red-400 mb-4">Configuration Error</h3>
+        <p className="text-gray-300 mb-6">LiveKit server URL is not configured. Please set REACT_APP_LIVEKIT_URL environment variable.</p>
+        <button 
+          onClick={onLeave}
+          className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300"
+        >
+          Back to Lobby
+        </button>
+      </div>
     );
   }
 
   return (
     <div className="w-full max-w-4xl h-[80vh] bg-gray-800 p-6 rounded-2xl shadow-lg flex flex-col" data-lk-theme="default">
-        <LiveKitRoom
-            token={token}
-            serverUrl={serverUrl}
-            connect={true}
-            // Let LiveKit handle audio only if no effect is selected.
-            // Otherwise, our AudioProcessor component will handle it.
-            audio={voiceEffect === 'none'} 
-            video={false}
-            onDisconnected={onLeave}
-        >
-            <h2 className="text-2xl font-bold mb-4">Room: <span className="text-indigo-400 font-mono text-xl">{roomId}</span></h2>
-            <GridLayout tracks={tracks} style={{ height: 'calc(100% - 120px)' }}>
-              <ParticipantTile />
-            </GridLayout>
-            <ControlBar controls={{ microphone: true, camera: false, screenShare: false, leave: true }} onLeave={onLeave}/>
-            
-            {/* Conditionally render our audio processor if an effect is chosen */}
-            {voiceEffect !== 'none' && <AudioProcessor voiceEffect={voiceEffect} />}
-        </LiveKitRoom>
+      <LiveKitRoom
+        token={token}
+        serverUrl={serverUrl}
+        connect={true}
+        audio={voiceEffect === 'none'} // Only let LiveKit handle audio if no effect
+        video={false}
+        onDisconnected={() => {
+          console.log('Disconnected from room');
+          onLeave();
+        }}
+        onError={(error) => {
+          console.error('LiveKit room error:', error);
+          setError(`Room error: ${error.message}`);
+        }}
+      >
+        <RoomContent roomId={roomId} voiceEffect={voiceEffect} onLeave={onLeave} />
+      </LiveKitRoom>
     </div>
+  );
+};
+
+// --- Separate Room Content Component ---
+const RoomContent = ({ roomId, voiceEffect, onLeave }) => {
+  const tracks = useTracks([Track.Source.Camera, Track.Source.Microphone], { onlySubscribed: false });
+
+  return (
+    <>
+      <div className="flex justify-between items-center mb-4">
+        <h2 className="text-2xl font-bold">
+          Room: <span className="text-indigo-400 font-mono text-xl">{roomId}</span>
+        </h2>
+        {voiceEffect !== 'none' && (
+          <span className="bg-indigo-900 text-indigo-200 px-3 py-1 rounded-full text-sm">
+            Voice: {voiceEffect}
+          </span>
+        )}
+      </div>
+      
+      <GridLayout tracks={tracks} style={{ height: 'calc(100% - 120px)' }}>
+        <ParticipantTile />
+      </GridLayout>
+      
+      <ControlBar 
+        controls={{ 
+          microphone: true, 
+          camera: false, 
+          screenShare: false, 
+          leave: true 
+        }} 
+        onLeave={onLeave}
+      />
+      
+      {/* Only render AudioProcessor if voice effect is selected */}
+      {voiceEffect !== 'none' && <AudioProcessor voiceEffect={voiceEffect} />}
+    </>
   );
 };
