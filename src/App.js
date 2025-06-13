@@ -5,6 +5,7 @@ import {
   ParticipantTile,
   useToken,
   useTracks,
+  useLiveKitRoom,
 } from '@livekit/components-react';
 import { Track } from 'livekit-client';
 import '@livekit/components-styles';
@@ -13,25 +14,29 @@ import '@livekit/components-styles';
 const App = () => {
   const [page, setPage] = useState('landing');
   const [roomId, setRoomId] = useState('');
-  // Use a ref to hold the processed audio stream to pass between Lobby and ChatRoom
   const processedStreamRef = useRef(null);
+  const originalStreamRef = useRef(null); // Keep a ref to the original stream for cleanup
 
   const goToLobby = (id) => {
     setRoomId(id);
     setPage('lobby');
   };
 
-  const goToChat = (stream) => {
-    // Store the processed audio stream so the ChatRoom can use it
+  const goToChat = (stream, originalStream) => {
     processedStreamRef.current = stream;
+    originalStreamRef.current = originalStream; // Store original stream
     setPage('chat');
   };
 
   const leaveRoom = () => {
-    // Clean up the stream when leaving the room completely
+    // Stop both the original and processed tracks
     if (processedStreamRef.current) {
         processedStreamRef.current.getTracks().forEach(track => track.stop());
         processedStreamRef.current = null;
+    }
+    if (originalStreamRef.current) {
+        originalStreamRef.current.getTracks().forEach(track => track.stop());
+        originalStreamRef.current = null;
     }
     setRoomId('');
     setPage('landing');
@@ -63,7 +68,6 @@ const App = () => {
 const LandingPage = ({ onGoToLobby }) => {
   const [joinRoomId, setJoinRoomId] = useState('');
 
-  // Create a random room ID
   const createRoom = () => {
     const newRoomId = `room-${Math.random().toString(36).substring(7)}`;
     onGoToLobby(newRoomId);
@@ -106,42 +110,29 @@ const Lobby = ({ roomId, onGoToChat }) => {
     const [voiceEffect, setVoiceEffect] = useState('none');
     const [isJoining, setIsJoining] = useState(false);
     
-    // This function now handles getting mic access AND processing the audio
     const handleJoinChat = async () => {
         setIsJoining(true);
         setMicError('');
-
         try {
-            // 1. Get the original audio stream from the microphone
             const originalStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
 
-            // If no voice effect is selected, use the original stream
             if (voiceEffect === 'none') {
-                onGoToChat(originalStream);
+                onGoToChat(originalStream, originalStream); // Pass original twice if no effect
                 return;
             }
 
-            // 2. Create an AudioContext to process the sound
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const source = audioContext.createMediaStreamSource(originalStream);
-            
-            // 3. Create the pitch-shifting filter
-            const biquadFilter = audioContext.createBiquadFilter();
-            biquadFilter.type = 'lowpass'; // This is a bit of a hack, detune is the key
-            
-            // Set the detune value. "Cents" are 1/100th of a semitone.
-            // Negative values lower the pitch, positive values raise it.
-            biquadFilter.detune.value = voiceEffect === 'male' ? -500 : 500;
-
-            // 4. Create a destination to capture the processed audio
             const destination = audioContext.createMediaStreamDestination();
             
-            // 5. Connect the nodes: microphone -> filter -> destination
+            const biquadFilter = audioContext.createBiquadFilter();
+            biquadFilter.type = 'lowpass';
+            biquadFilter.detune.value = voiceEffect === 'male' ? -500 : 500;
+            
             source.connect(biquadFilter);
             biquadFilter.connect(destination);
 
-            // 6. Pass the NEW, processed stream to the next page
-            onGoToChat(destination.stream);
+            onGoToChat(destination.stream, originalStream);
 
         } catch (err) {
              console.error("Error accessing microphone or processing audio:", err);
@@ -176,42 +167,63 @@ const Lobby = ({ roomId, onGoToChat }) => {
       );
 };
 
+// --- NEW: Audio Publisher Component ---
+// This component's only job is to publish the custom audio track.
+const AudioPublisher = ({ audioTrack }) => {
+  const { room } = useLiveKitRoom();
+
+  useEffect(() => {
+    if (room && audioTrack) {
+      const publishTrack = async () => {
+        try {
+          // Publish the custom track to the room
+          await room.localParticipant.publishTrack(audioTrack);
+        } catch (error) {
+          console.error("Failed to publish audio track:", error);
+        }
+      };
+      publishTrack();
+
+      // Cleanup: unpublish the track when the component unmounts
+      return () => {
+        if(audioTrack) {
+            room.localParticipant.unpublishTrack(audioTrack);
+        }
+      };
+    }
+  }, [room, audioTrack]);
+
+  return null; // This component doesn't render anything visible
+};
+
 
 // --- Chat Room Component ---
 const ChatRoom = ({ roomId, onLeave, processedAudioStream }) => {
-  // Generate a random identity for this user
   const [identity] = useState(`user-${Math.random().toString(36).substring(7)}`);
-  
-  // Use the useToken hook to fetch the token from your serverless function
   const token = useToken('/api/getToken', roomId, { userInfo: { identity }});
-
-  // Get the LiveKit Server URL from your Vercel Environment Variables
   const serverUrl = process.env.REACT_APP_LIVEKIT_URL;
-
-  // This hook gets all the tracks in the room
+  
   const tracks = useTracks(
     [Track.Source.Camera, Track.Source.Microphone],
     { onlySubscribed: false }
   );
 
-  // --- FIX: Check if the stream from the lobby exists before continuing ---
   if (!processedAudioStream) {
     return (
-        <div className="text-red-500 text-center p-8 bg-gray-800 rounded-lg">
-            <h3 className="text-2xl font-bold mb-4">Microphone Not Ready</h3>
-            <p>Could not get your microphone stream. Please go back and try rejoining the room.</p>
+        <div className="w-full max-w-lg text-center mx-auto bg-gray-800 p-8 rounded-2xl shadow-lg">
+            <h3 className="text-2xl font-bold mb-4 text-red-500">Microphone Not Ready</h3>
+            <p className="text-gray-400">Could not get your microphone stream. Please go back and try rejoining the room.</p>
             <button onClick={onLeave} className="mt-6 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg">
               Back to Lobby
             </button>
         </div>
     );
   }
-
-  // --- FIX: Extract the specific audio TRACK from the stream ---
+  
   const audioTrack = processedAudioStream.getAudioTracks()[0];
 
   if (!serverUrl) {
-    return <div className="text-red-500">Error: LiveKit Server URL is not configured. Please set REACT_APP_LIVEKIT_URL.</div>
+    return <div className="text-red-500 text-center">Error: LiveKit Server URL is not configured. Please set REACT_APP_LIVEKIT_URL.</div>
   }
 
   return (
@@ -227,16 +239,18 @@ const ChatRoom = ({ roomId, onLeave, processedAudioStream }) => {
             token={token}
             serverUrl={serverUrl}
             connect={true}
-            // --- FIX: Pass the specific audio TRACK, not the whole stream object ---
-            audio={audioTrack}
+            // --- FIX: Tell LiveKit NOT to handle audio automatically ---
+            audio={false}
             video={false}
             onDisconnected={onLeave}
         >
             {/* The GridLayout component arranges your participants in a grid */}
-            {/* The talking indicator is built into ParticipantTile! */}
             <GridLayout tracks={tracks} style={{ height: 'calc(100% - 60px)' }}>
               <ParticipantTile />
             </GridLayout>
+
+            {/* --- FIX: Use our new component to manually publish the custom track after connecting --- */}
+            {audioTrack && <AudioPublisher audioTrack={audioTrack} />}
         </LiveKitRoom>
     </div>
   );
