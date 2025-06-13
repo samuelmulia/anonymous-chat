@@ -1,49 +1,46 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   LiveKitRoom,
   AudioConference,
   ControlBar
 } from '@livekit/components-react';
 import '@livekit/components-styles';
-import { AccessToken } from 'livekit-server-sdk'; // Import for client-side token generation
 
 // --- Main App Component ---
 export default function App() {
   const [roomId, setRoomId] = useState('');
   const [token, setToken] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  // Get the LiveKit Server URL and credentials from Vercel Environment Variables
+  // Get the LiveKit Server URL from Vercel Environment Variables
   const serverUrl = process.env.REACT_APP_LIVEKIT_URL;
-  const apiKey = process.env.REACT_APP_LIVEKIT_API_KEY;
-  const apiSecret = process.env.REACT_APP_LIVEKIT_API_SECRET;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (roomId.trim()) {
       setIsLoading(true);
+      setError('');
 
-      if (!apiKey || !apiSecret) {
-        alert("LiveKit API Key or Secret is not configured. Please check your Vercel Environment Variables.");
-        setIsLoading(false);
-        return;
-      }
-      
       // Generate a simple random identity for the user
       const identity = `user-${Math.random().toString(36).substring(7)}`;
 
-      // --- FIX: Generate token on the client-side for this workaround ---
-      const at = new AccessToken(apiKey, apiSecret, { identity });
-      at.addGrant({ 
-        room: roomId, 
-        roomJoin: true, 
-        canPublish: true, 
-        canSubscribe: true 
-      });
-      const generatedToken = await at.toJwt();
-      setToken(generatedToken);
-      
-      setIsLoading(false);
+      try {
+        const resp = await fetch(`/api/getToken?roomName=${roomId}&identity=${identity}`);
+        const data = await resp.json();
+        
+        if (data.token) {
+          setToken(data.token);
+        } else {
+          setError(data.error || 'Failed to get a token.');
+          console.error("Failed to get a token:", data.error);
+        }
+      } catch (err) {
+        setError("There was an error fetching the access token.");
+        console.error("Error fetching token:", err);
+      } finally {
+        setIsLoading(false);
+      }
     }
   };
 
@@ -93,6 +90,7 @@ export default function App() {
             className="w-full bg-gray-800 border border-gray-700 rounded-lg py-3 px-4 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-white"
             required
         />
+        {error && <p className="text-red-500 text-sm">{error}</p>}
         <button type="submit" disabled={isLoading} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-lg transition duration-300 disabled:bg-indigo-400">
           {isLoading ? 'Joining...' : 'Join Room'}
         </button>
