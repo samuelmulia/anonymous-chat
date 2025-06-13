@@ -206,6 +206,7 @@ const ChatRoom = ({ roomId, onLeave, voiceEffect }) => {
   const [token, setToken] = useState(null);
   const serverUrl = process.env.REACT_APP_LIVEKIT_URL;
 
+  // Fetch the access token from our serverless function
   useEffect(() => {
     const fetchToken = async () => {
       try {
@@ -220,15 +221,18 @@ const ChatRoom = ({ roomId, onLeave, voiceEffect }) => {
         console.error("Error fetching token:", err);
       }
     };
-    fetchToken();
+    if(roomId && identity) {
+        fetchToken();
+    }
   }, [roomId, identity]);
 
   const tracks = useTracks([Track.Source.Camera, Track.Source.Microphone], { onlySubscribed: false });
 
+  // Show a loading state while fetching the token
   if (!token) {
     return (
         <div className="w-full max-w-lg text-center mx-auto bg-gray-800 p-8 rounded-2xl shadow-lg">
-            <h3 className="text-xl font-semibold">Connecting...</h3>
+            <h3 className="text-xl font-semibold">Connecting to room...</h3>
         </div>
     );
   }
@@ -239,7 +243,9 @@ const ChatRoom = ({ roomId, onLeave, voiceEffect }) => {
             token={token}
             serverUrl={serverUrl}
             connect={true}
-            audio={voiceEffect === 'none'} // Let LiveKit manage audio only if no effect is selected
+            // Let LiveKit handle audio only if no effect is selected.
+            // Otherwise, our AudioProcessor component will handle it.
+            audio={voiceEffect === 'none'} 
             video={false}
             onDisconnected={onLeave}
         >
@@ -248,6 +254,8 @@ const ChatRoom = ({ roomId, onLeave, voiceEffect }) => {
               <ParticipantTile />
             </GridLayout>
             <ControlBar controls={{ microphone: true, camera: false, screenShare: false, leave: true }} onLeave={onLeave}/>
+            
+            {/* Conditionally render our audio processor if an effect is chosen */}
             {voiceEffect !== 'none' && <AudioProcessor voiceEffect={voiceEffect} />}
         </LiveKitRoom>
     </div>
