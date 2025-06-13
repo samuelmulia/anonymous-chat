@@ -176,7 +176,7 @@ const AudioPublisher = ({ audioTrack }) => {
     if (room && audioTrack) {
       const publishTrack = async () => {
         try {
-          // Publish the custom track to the room
+          // Publish the track to the room
           await room.localParticipant.publishTrack(audioTrack);
         } catch (error) {
           console.error("Failed to publish audio track:", error);
