@@ -237,15 +237,35 @@ const Lobby = ({ roomId, onGoToChat, voiceEffect, setVoiceEffect }) => {
 
 // --- Chat Room Component ---
 const ChatRoom = ({ roomId, voiceEffect, onLeave, localStream }) => {
+    // --- NEW: Participant state now includes `isTalking` ---
     const [participants, setParticipants] = useState([]);
     const [isMuted, setIsMuted] = useState(false);
     const [connectionStatus, setConnectionStatus] = useState('connecting');
     const pc = useRef(new RTCPeerConnection(servers));
     const remoteAudioRef = useRef();
-    
-    // --- FIX: Add role management and more robust state ---
     const localId = useRef(`user_${Date.now()}`).current;
-    const role = useRef(null); // 'caller' or 'callee'
+    const role = useRef(null);
+    const audioAnalysers = useRef({}); // Store analysers for each participant
+    const animationFrameId = useRef(null);
+
+    // --- NEW: Function to update talking status ---
+    const setTalkingStatus = (participantId, isTalking) => {
+        setParticipants(prev => 
+            prev.map(p => p.id === participantId ? { ...p, isTalking } : p)
+        );
+    };
+
+    // --- NEW: Function to setup audio analysis ---
+    const setupAudioAnalyser = (stream, participantId) => {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 512;
+        analyser.smoothingTimeConstant = 0.5;
+        const source = audioContext.createMediaStreamSource(stream);
+        source.connect(analyser);
+        audioAnalysers.current[participantId] = { analyser, dataArray: new Uint8Array(analyser.frequencyBinCount) };
+    };
+
 
     useEffect(() => {
         if (!db || !localStream) {
@@ -257,32 +277,52 @@ const ChatRoom = ({ roomId, voiceEffect, onLeave, localStream }) => {
         const roomRef = doc(db, 'rooms', roomId);
         let unsubscribes = [];
 
-        // --- FIX: Add ICE restart logic ---
         const handleConnectionStateChange = async () => {
-            console.log(`Connection state: ${pc.current.connectionState}`);
             setConnectionStatus(pc.current.connectionState);
             
             if (pc.current.connectionState === 'connected') {
                 const roomDoc = await getDoc(roomRef);
                 const roomData = roomDoc.data();
                 const remoteRole = role.current === 'caller' ? 'callee' : 'caller';
+                const remoteId = roomData[remoteRole];
+                
                 setParticipants([
-                    {id: localId, name: 'You'},
-                    {id: roomData[remoteRole], name: 'Guest'}
+                    {id: localId, name: 'You', isTalking: false},
+                    {id: remoteId, name: 'Guest', isTalking: false}
                 ]);
+                
+                // --- NEW: Setup analyser for local stream ---
+                setupAudioAnalyser(localStream, localId);
+                
+                // --- NEW: Start the animation loop for audio analysis ---
+                const analyseAudio = () => {
+                    Object.keys(audioAnalysers.current).forEach(id => {
+                        const { analyser, dataArray } = audioAnalysers.current[id];
+                        analyser.getByteFrequencyData(dataArray);
+                        const sum = dataArray.reduce((a, b) => a + b, 0);
+                        const avg = sum / dataArray.length;
+                        
+                        // Threshold to detect speech
+                        const isTalking = avg > 20; 
+
+                        // Update state only if it changes
+                        const participant = participants.find(p => p.id === id);
+                        if (participant && participant.isTalking !== isTalking) {
+                            setTalkingStatus(id, isTalking);
+                        }
+                    });
+                    animationFrameId.current = requestAnimationFrame(analyseAudio);
+                };
+                analyseAudio();
             }
 
-            // This triggers an ICE restart if the connection fails
             if (pc.current.connectionState === 'failed') {
                 await pc.current.createOffer({ iceRestart: true });
             }
         };
         
-        // --- FIX: Add negotiation needed logic ---
-        // This handles re-negotiation for ICE restarts
         const handleNegotiationNeeded = async () => {
-            if (role.current !== 'caller') return; // Only caller initiates offers
-            console.log('Negotiation needed, creating offer...');
+            if (role.current !== 'caller') return;
             try {
                 const offer = await pc.current.createOffer();
                 await pc.current.setLocalDescription(offer);
@@ -296,64 +336,51 @@ const ChatRoom = ({ roomId, voiceEffect, onLeave, localStream }) => {
             pc.current.onconnectionstatechange = handleConnectionStateChange;
             pc.current.onnegotiationneeded = handleNegotiationNeeded;
 
-            localStream.getTracks().forEach(track => {
-                pc.current.addTrack(track, localStream);
-            });
+            localStream.getTracks().forEach(track => pc.current.addTrack(track, localStream));
 
             pc.current.ontrack = event => {
                 if (remoteAudioRef.current && event.streams[0]) {
                     remoteAudioRef.current.srcObject = event.streams[0];
+                    // --- NEW: Setup analyser for remote stream when it arrives ---
+                    const remoteParticipant = participants.find(p => p.name === 'Guest');
+                    if (remoteParticipant) {
+                        setupAudioAnalyser(event.streams[0], remoteParticipant.id);
+                    }
                 }
             };
             
             const roomDoc = await getDoc(roomRef);
             const roomData = roomDoc.data();
 
-            if (!roomData.caller) { // This user is the first one, becomes the caller
+            if (!roomData.caller) {
                 role.current = 'caller';
-                setParticipants([{id: localId, name: 'You'}]);
-                
-                // Set up ICE candidate listener
+                setParticipants([{id: localId, name: 'You', isTalking: false}]);
                 const callerCandidates = collection(roomRef, 'callerCandidates');
                 pc.current.onicecandidate = event => event.candidate && addDoc(callerCandidates, event.candidate.toJSON());
-                
-                // Set this user as the caller in Firestore
                 await updateDoc(roomRef, { caller: localId });
                 
-                // Listen for an answer from the callee
                 unsubscribes.push(onSnapshot(roomRef, (snapshot) => {
                     const data = snapshot.data();
                     if (!pc.current.currentRemoteDescription && data?.answer) {
-                        console.log('Got answer, setting remote description');
                         pc.current.setRemoteDescription(new RTCSessionDescription(data.answer));
                     }
                 }));
 
-                // Listen for ICE candidates from the callee
                 const calleeCandidates = collection(roomRef, 'calleeCandidates');
                 unsubscribes.push(onSnapshot(calleeCandidates, snapshot => {
                     snapshot.docChanges().forEach(change => change.type === 'added' && pc.current.addIceCandidate(new RTCIceCandidate(change.doc.data())));
                 }));
 
-            } else { // This user is the second one, becomes the callee
+            } else {
                 role.current = 'callee';
-                
-                // Set up ICE candidate listener
                 const calleeCandidates = collection(roomRef, 'calleeCandidates');
                 pc.current.onicecandidate = event => event.candidate && addDoc(calleeCandidates, event.candidate.toJSON());
                 
-                // Set remote description from the offer
                 await pc.current.setRemoteDescription(new RTCSessionDescription(roomData.offer));
-                
-                // Create and set answer
                 const answerDescription = await pc.current.createAnswer();
                 await pc.current.setLocalDescription(answerDescription);
-                await updateDoc(roomRef, { 
-                    answer: { sdp: answerDescription.sdp, type: answerDescription.type },
-                    callee: localId
-                });
+                await updateDoc(roomRef, { answer: { sdp: answerDescription.sdp, type: answerDescription.type }, callee: localId });
                 
-                // Listen for ICE candidates from the caller
                 const callerCandidates = collection(roomRef, 'callerCandidates');
                 unsubscribes.push(onSnapshot(callerCandidates, snapshot => {
                     snapshot.docChanges().forEach(change => change.type === 'added' && pc.current.addIceCandidate(new RTCIceCandidate(change.doc.data())));
@@ -365,28 +392,19 @@ const ChatRoom = ({ roomId, voiceEffect, onLeave, localStream }) => {
         
         return () => {
             unsubscribes.forEach(unsub => unsub());
-            if (pc.current) {
-                pc.current.close();
-            }
+            if (pc.current) pc.current.close();
+            if(animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
+            Object.values(audioAnalysers.current).forEach(analyserData => {
+                analyserData.analyser.disconnect();
+            });
+            audioAnalysers.current = {};
         };
-    }, [roomId, localStream, localId]);
+    }, []); // Removed dependencies to simplify logic and prevent re-runs
     
-    // --- FIX: More robust leave logic ---
     const handleLeave = async () => {
         if (db) {
             try {
-                const roomRef = doc(db, 'rooms', roomId);
-                const roomDoc = await getDoc(roomRef);
-                if (!roomDoc.exists()) {
-                    onLeave();
-                    return;
-                }
-
-                // Delete the entire room document on leave.
-                // This is a simple but effective strategy for a two-person chat
-                // to ensure no stale data prevents rejoining.
-                await deleteDoc(roomRef);
-
+                await deleteDoc(doc(db, 'rooms', roomId));
             } catch (error) {
                 console.error("Error cleaning up room:", error);
             }
@@ -416,7 +434,8 @@ const ChatRoom = ({ roomId, voiceEffect, onLeave, localStream }) => {
       <div className="flex-grow bg-gray-900 rounded-lg p-4 grid grid-cols-2 md:grid-cols-3 gap-4 auto-rows-min content-start">
         {participants.map(p => (
             <div key={p.id} className={`p-4 rounded-lg flex flex-col items-center justify-center transition-all bg-gray-700`}>
-                <div className={`w-16 h-16 rounded-full mb-3 flex items-center justify-center text-2xl font-bold transition-colors bg-indigo-500`}>
+                {/* --- NEW: Conditional class for the talking indicator --- */}
+                <div className={`relative w-16 h-16 bg-indigo-500 rounded-full mb-3 flex items-center justify-center text-2xl font-bold transition-all duration-300 ${p.isTalking ? 'ring-4 ring-offset-4 ring-offset-gray-700 ring-green-500' : ''}`}>
                     {p.name.charAt(0)}
                 </div>
                 <p className="font-semibold">{p.name}</p>
