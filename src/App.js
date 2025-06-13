@@ -7,33 +7,28 @@ import {
   useTracks,
   useLiveKitRoom,
 } from '@livekit/components-react';
-import { Track } from 'livekit-client';
+import { LocalAudioTrack, Track } from 'livekit-client';
 import '@livekit/components-styles';
 
 // --- Main App Component ---
 const App = () => {
   const [page, setPage] = useState('landing');
   const [roomId, setRoomId] = useState('');
-  const processedStreamRef = useRef(null);
-  const originalStreamRef = useRef(null); // Keep a ref to the original stream for cleanup
+  const [voiceEffect, setVoiceEffect] = useState('none');
+  const originalStreamRef = useRef(null);
 
   const goToLobby = (id) => {
     setRoomId(id);
     setPage('lobby');
   };
 
-  const goToChat = (stream, originalStream) => {
-    processedStreamRef.current = stream;
-    originalStreamRef.current = originalStream; // Store original stream
+  const goToChat = (stream, effect) => {
+    originalStreamRef.current = stream;
+    setVoiceEffect(effect);
     setPage('chat');
   };
 
   const leaveRoom = () => {
-    // Stop both the original and processed tracks
-    if (processedStreamRef.current) {
-        processedStreamRef.current.getTracks().forEach(track => track.stop());
-        processedStreamRef.current = null;
-    }
     if (originalStreamRef.current) {
         originalStreamRef.current.getTracks().forEach(track => track.stop());
         originalStreamRef.current = null;
@@ -49,7 +44,7 @@ const App = () => {
       case 'lobby':
         return <Lobby roomId={roomId} onGoToChat={goToChat} />;
       case 'chat':
-        return <ChatRoom roomId={roomId} onLeave={leaveRoom} processedAudioStream={processedStreamRef.current} />;
+        return <ChatRoom roomId={roomId} onLeave={leaveRoom} originalStream={originalStreamRef.current} voiceEffect={voiceEffect} />;
       default:
         return <LandingPage onGoToLobby={goToLobby} />;
     }
@@ -110,32 +105,15 @@ const Lobby = ({ roomId, onGoToChat }) => {
     const [voiceEffect, setVoiceEffect] = useState('none');
     const [isJoining, setIsJoining] = useState(false);
     
+    // In the lobby, we just get the original stream and pass it along with the effect choice.
     const handleJoinChat = async () => {
         setIsJoining(true);
         setMicError('');
         try {
             const originalStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-
-            if (voiceEffect === 'none') {
-                onGoToChat(originalStream, originalStream); // Pass original twice if no effect
-                return;
-            }
-
-            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            const source = audioContext.createMediaStreamSource(originalStream);
-            const destination = audioContext.createMediaStreamDestination();
-            
-            const biquadFilter = audioContext.createBiquadFilter();
-            biquadFilter.type = 'lowpass';
-            biquadFilter.detune.value = voiceEffect === 'male' ? -500 : 500;
-            
-            source.connect(biquadFilter);
-            biquadFilter.connect(destination);
-
-            onGoToChat(destination.stream, originalStream);
-
+            onGoToChat(originalStream, voiceEffect);
         } catch (err) {
-             console.error("Error accessing microphone or processing audio:", err);
+             console.error("Error accessing microphone:", err);
              setMicError(`Error: ${err.message}. Please check your browser/system permissions.`);
              setIsJoining(false);
         }
@@ -167,48 +145,71 @@ const Lobby = ({ roomId, onGoToChat }) => {
       );
 };
 
-// --- NEW: Audio Publisher Component ---
-// This component's only job is to publish the custom audio track.
-const AudioPublisher = ({ audioTrack }) => {
+// --- NEW: Audio Processor & Publisher Component ---
+// This component now handles all audio processing and publishing safely inside the LiveKitRoom context.
+const AudioProcessor = ({ originalStream, voiceEffect }) => {
   const { room } = useLiveKitRoom();
 
   useEffect(() => {
-    if (room && audioTrack) {
-      const publishTrack = async () => {
-        try {
-          // Publish the track to the room
-          await room.localParticipant.publishTrack(audioTrack);
-        } catch (error) {
-          console.error("Failed to publish audio track:", error);
-        }
-      };
-      publishTrack();
+    if (!room || !originalStream) return;
 
-      // Cleanup: unpublish the track when the component unmounts
-      return () => {
-        if(audioTrack) {
-            room.localParticipant.unpublishTrack(audioTrack);
-        }
-      };
-    }
-  }, [room, audioTrack]);
+    let processedTrack = null;
+    let audioContext = null;
+    let originalSource = null;
+    
+    const setupAndPublish = async () => {
+      if (voiceEffect === 'none') {
+        // If no effect, just use the original track
+        processedTrack = originalStream.getAudioTracks()[0];
+      } else {
+        // If there's an effect, create the processing pipeline
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        originalSource = audioContext.createMediaStreamSource(originalStream);
+        const destination = audioContext.createMediaStreamDestination();
+        
+        const biquadFilter = audioContext.createBiquadFilter();
+        biquadFilter.type = 'lowpass';
+        biquadFilter.detune.value = voiceEffect === 'male' ? -600 : 700; // Adjusted values for more effect
+        
+        originalSource.connect(biquadFilter);
+        biquadFilter.connect(destination);
 
-  return null; // This component doesn't render anything visible
+        processedTrack = destination.stream.getAudioTracks()[0];
+      }
+
+      try {
+        // Publish the final track (either original or processed)
+        await room.localParticipant.publishTrack(processedTrack);
+      } catch (error) {
+        console.error("Failed to publish audio track:", error);
+      }
+    };
+
+    setupAndPublish();
+
+    // Cleanup function
+    return () => {
+      if (processedTrack) {
+        room.localParticipant.unpublishTrack(processedTrack);
+      }
+      if (audioContext) {
+        audioContext.close();
+      }
+    };
+  }, [room, originalStream, voiceEffect]);
+
+  return null; // This component renders nothing visible
 };
 
-
 // --- Chat Room Component ---
-const ChatRoom = ({ roomId, onLeave, processedAudioStream }) => {
+const ChatRoom = ({ roomId, onLeave, originalStream, voiceEffect }) => {
   const [identity] = useState(`user-${Math.random().toString(36).substring(7)}`);
   const token = useToken('/api/getToken', roomId, { userInfo: { identity }});
   const serverUrl = process.env.REACT_APP_LIVEKIT_URL;
   
-  const tracks = useTracks(
-    [Track.Source.Camera, Track.Source.Microphone],
-    { onlySubscribed: false }
-  );
+  const tracks = useTracks([Track.Source.Camera, Track.Source.Microphone], { onlySubscribed: false });
 
-  if (!processedAudioStream) {
+  if (!originalStream) {
     return (
         <div className="w-full max-w-lg text-center mx-auto bg-gray-800 p-8 rounded-2xl shadow-lg">
             <h3 className="text-2xl font-bold mb-4 text-red-500">Microphone Not Ready</h3>
@@ -219,8 +220,6 @@ const ChatRoom = ({ roomId, onLeave, processedAudioStream }) => {
         </div>
     );
   }
-  
-  const audioTrack = processedAudioStream.getAudioTracks()[0];
 
   if (!serverUrl) {
     return <div className="text-red-500 text-center">Error: LiveKit Server URL is not configured. Please set REACT_APP_LIVEKIT_URL.</div>
@@ -239,18 +238,16 @@ const ChatRoom = ({ roomId, onLeave, processedAudioStream }) => {
             token={token}
             serverUrl={serverUrl}
             connect={true}
-            // --- FIX: Tell LiveKit NOT to handle audio automatically ---
-            audio={false}
+            audio={false} // We are handling audio manually
             video={false}
             onDisconnected={onLeave}
         >
-            {/* The GridLayout component arranges your participants in a grid */}
             <GridLayout tracks={tracks} style={{ height: 'calc(100% - 60px)' }}>
               <ParticipantTile />
             </GridLayout>
 
-            {/* --- FIX: Use our new component to manually publish the custom track after connecting --- */}
-            {audioTrack && <AudioPublisher audioTrack={audioTrack} />}
+            {/* Use the new processor to handle audio publishing */}
+            <AudioProcessor originalStream={originalStream} voiceEffect={voiceEffect} />
         </LiveKitRoom>
     </div>
   );
