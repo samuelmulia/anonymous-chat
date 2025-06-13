@@ -10,6 +10,7 @@ import '@livekit/components-styles';
 export default function App() {
   const [roomId, setRoomId] = useState('');
   const [token, setToken] = useState(null); // NEW: Token is now in component state
+  const [isLoading, setIsLoading] = useState(false);
 
   // Get the LiveKit Server URL from Vercel Environment Variables
   const serverUrl = process.env.REACT_APP_LIVEKIT_URL;
@@ -17,6 +18,7 @@ export default function App() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (roomId.trim()) {
+      setIsLoading(true);
       // Generate a simple random identity for the user
       const identity = `user-${Math.random().toString(36).substring(7)}`;
 
@@ -35,6 +37,8 @@ export default function App() {
       } catch (err) {
         console.error("Error fetching token:", err);
         alert("There was an error fetching the access token.");
+      } finally {
+        setIsLoading(false);
       }
     }
   };
@@ -89,8 +93,8 @@ export default function App() {
             className="w-full bg-gray-800 border border-gray-700 rounded-lg py-3 px-4 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-white"
             required
         />
-        <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-lg transition duration-300">
-          Join Room
+        <button type="submit" disabled={isLoading} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-lg transition duration-300 disabled:bg-indigo-400">
+          {isLoading ? 'Joining...' : 'Join Room'}
         </button>
       </form>
     </div>
